@@ -11,6 +11,6 @@ Criada em Nestjs
 
 ## Imagens que já estão num bucket da S3: 
 
-- cat.jpg
-- dog.png
-- nature.webp
+- [cat.jpg](https://pictures-processing.s3.amazonaws.com/pictures/cat.jpg)
+- [dog.png](https://pictures-processing.s3.amazonaws.com/pictures/dog.png)
+- [nature.webp](https://pictures-processing.s3.amazonaws.com/pictures/nature.webp)
