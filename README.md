@@ -2,6 +2,11 @@
 
 Criada em Nestjs
 
+## Comandos
+
+- npm install
+- docker-compose up --build  
+
 ## Endpoints:
 
 - Consulta - http://localhost:3000/api/images/cat.jpg?fm=webp
