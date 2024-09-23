@@ -8,3 +8,9 @@ Criada em Nestjs
 - Upload de imagem - http://localhost:3000/api/images/upload
 
 - Documentação em : http://localhost:3000/api
+
+## Imagens que já estão num bucket da S3: 
+
+- cat.jpg
+- dog.png
+- nature.webp
