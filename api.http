@@ -1,0 +1,1 @@
+GET http://localhost:3000/api/images/dog.jpg?fm=webp&q=75&w=128&h=128&gray=0
