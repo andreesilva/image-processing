@@ -6,10 +6,11 @@ import {
   Query,
   UploadedFile,
   UseInterceptors,
+  ParseFilePipeBuilder,
+  HttpStatus,
 } from '@nestjs/common';
 import { ImagesService } from './images.service';
 
-import { console } from 'inspector';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { ApiBody, ApiConsumes } from '@nestjs/swagger';
 
@@ -36,8 +37,19 @@ export class ImagesController {
     },
   })
   @UseInterceptors(FileInterceptor('file'))
-  uploadFile(@UploadedFile() file: Express.Multer.File) {
-    console.log('file', file);
+  uploadFile(
+    @UploadedFile(
+      new ParseFilePipeBuilder()
+        .addFileTypeValidator({
+          fileType: 'jpg|jpeg|png|webp',
+        })
+
+        .build({
+          errorHttpStatusCode: HttpStatus.UNPROCESSABLE_ENTITY,
+        }),
+    )
+    file: Express.Multer.File,
+  ) {
     try {
       return this.imagesService.uploadFile(file);
     } catch (error) {
@@ -48,7 +60,6 @@ export class ImagesController {
   @Get(':nameImage')
   image(@Query() query: any, @Param('nameImage') nameImage: string) {
     try {
-      console.log(nameImage);
       return this.imagesService.getImage(query, nameImage);
     } catch (error) {
       throw error;

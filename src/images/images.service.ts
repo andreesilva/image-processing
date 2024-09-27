@@ -1,33 +1,35 @@
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 require('aws-sdk/lib/maintenance_mode_message').suppress = true;
-import { HttpException, HttpStatus, Injectable } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 
-import { S3 } from 'aws-sdk';
 import { ConfigService } from '@nestjs/config';
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 require('dotenv').config();
 import { v4 as uuidv4 } from 'uuid';
-import * as sharp from 'sharp';
 
 import * as fs from 'fs';
+import { AWS_S3 } from 'src/infrastructure/aws3';
+import { Sharp } from 'src/infrastructure/sharp';
 
 @Injectable()
 export class ImagesService {
-  constructor(private configService: ConfigService) {}
-
-  AWS_S3_BUCKET = process.env.AWS_BUCKET_NAME;
-  s3 = new S3({
-    accessKeyId: process.env.AWS_ACCESS_KEY_ID,
-    secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
-  });
+  constructor(
+    private configService: ConfigService,
+    private s3: AWS_S3,
+    private sharp: Sharp,
+  ) {}
 
   async uploadFile(file) {
     const { originalname } = file;
 
     try {
-      const responseUploadImageOriginal = await this.s3_upload(
+      const responseUploadImageOriginal = await this.s3.uploadImage(
         file.buffer,
-        this.AWS_S3_BUCKET + '/pictures',
+        this.s3.AWS_S3_BUCKET + '/pictures',
         originalname,
         file.mimetype,
       );
@@ -35,14 +37,14 @@ export class ImagesService {
         urlImage: responseUploadImageOriginal['Location'],
       };
     } catch (error) {
-      throw error;
+      throw new BadRequestException('Não foi possível realizar o upload');
     }
   }
 
   async getImage(query: any, nameImage: string) {
     const promises = [];
 
-    const sharpStream = sharp({ failOn: 'none' });
+    const sharpStream = this.sharp.fail();
 
     let quality: number;
     let resize: any = {};
@@ -54,23 +56,22 @@ export class ImagesService {
 
     const newNameImageOriginal = uuidv4() + '-' + nameImage;
 
-    const downloadParams = {
-      Bucket: this.AWS_S3_BUCKET + '/pictures',
-      Key: nameImage,
-    };
-
     try {
       //Verifica se existe o arquivo
-      await this.s3.headObject(downloadParams).promise();
 
-      //Baixando imagem do S3
-      this.s3
-        .getObject({
-          Bucket: this.AWS_S3_BUCKET + '/pictures',
-          Key: nameImage,
-        })
-        .createReadStream()
-        .pipe(sharpStream);
+      await this.s3.verificationImageExists(
+        this.s3.AWS_S3_BUCKET + '/pictures',
+        nameImage,
+      );
+      try {
+        await this.s3.downloadImage(
+          this.s3.AWS_S3_BUCKET + '/pictures',
+          nameImage,
+          sharpStream,
+        );
+      } catch (err) {
+        throw new BadRequestException('Erro ao processar a imagem');
+      }
 
       if (
         (query.fm == null || typeof query.fm == 'undefined') &&
@@ -79,27 +80,22 @@ export class ImagesService {
         (query.gray == null || isNaN(query.gray))
       ) {
         if (nameImageSplit[1] == 'png') {
-          promises.push(
-            sharpStream
-              .clone()
-              .png({ quality: 85 })
-              .toFile('pictures_resized/' + newNameImageOriginal),
-          );
+          try {
+            promises.push(
+              this.sharp.convertToPng(sharpStream, newNameImageOriginal),
+            );
+          } catch (err) {
+            throw new BadRequestException('Erro ao processar a imagem');
+          }
         }
-        if (nameImageSplit[1] == 'jpg') {
+        if (nameImageSplit[1] == 'jpg' || nameImageSplit[1] == 'jpeg') {
           promises.push(
-            sharpStream
-              .clone()
-              .jpeg({ quality: 85 })
-              .toFile('pictures_resized/' + newNameImageOriginal),
+            this.sharp.convertToJpg(sharpStream, newNameImageOriginal),
           );
         }
         if (nameImageSplit[1] == 'webp') {
           promises.push(
-            sharpStream
-              .clone()
-              .webp({ quality: 85 })
-              .toFile('pictures_resized/' + newNameImageOriginal),
+            this.sharp.convertToWebp(sharpStream, newNameImageOriginal),
           );
         }
 
@@ -112,21 +108,20 @@ export class ImagesService {
             );
 
             try {
-              //Subindo imagem para o S3
-              const responseUpload = await this.s3_upload(
+              const responseUpload = await this.s3.uploadImage(
                 buffer,
-                this.AWS_S3_BUCKET + '/pictures-resized',
+                this.s3.AWS_S3_BUCKET + '/pictures-resized',
                 newNameImageOriginal,
                 'image/' + nameImageSplit[1],
               );
 
               return responseUpload;
             } catch (error) {
-              throw error;
+              throw new BadRequestException('Erro ao processar a imagem');
             }
           })
-          .catch((err) => {
-            console.error('Erro ao processar a imagem', err);
+          .catch(() => {
+            throw new BadRequestException('Erro ao processar a imagem');
           });
 
         return {
@@ -134,10 +129,13 @@ export class ImagesService {
         };
       } else {
         if (query.fm !== null || typeof query.fm !== 'undefined') {
-          if (query.fm !== 'webp' && query.fm !== 'jpg' && query.fm !== 'png') {
-            return {
-              message: 'Formato de imagem não suportado',
-            };
+          if (
+            query.fm !== 'webp' &&
+            query.fm !== 'jpg' &&
+            query.fm !== 'png' &&
+            query.fm !== 'jpeg'
+          ) {
+            throw new BadRequestException('Formato de imagem nao suportado');
           } else {
             if (query.q !== null && !isNaN(query.q)) {
               quality = parseInt(query.q);
@@ -166,41 +164,42 @@ export class ImagesService {
               grayscale = true;
             }
 
-            if (query.fm == 'jpg') {
+            if (query.fm == 'jpg' || query.fm == 'jpeg') {
               promises.push(
-                sharpStream
-                  .clone()
-                  .jpeg({ quality: quality })
-                  .grayscale(grayscale)
-                  .resize(resize)
-                  .toFile('pictures_resized/' + referenceImage),
+                this.sharp.convertAndRezizeToJpg(
+                  sharpStream,
+                  quality,
+                  grayscale,
+                  resize,
+                  referenceImage,
+                ),
               );
             }
             if (query.fm == 'png') {
               promises.push(
-                sharpStream
-                  .clone()
-                  .png({ quality: quality })
-                  .grayscale(grayscale)
-                  .resize(resize)
-                  .toFile('pictures_resized/' + referenceImage),
+                this.sharp.convertAndRezizeToPng(
+                  sharpStream,
+                  quality,
+                  grayscale,
+                  resize,
+                  referenceImage,
+                ),
               );
             }
             if (query.fm == 'webp') {
               promises.push(
-                sharpStream
-                  .clone()
-                  .webp({ quality: quality })
-                  .grayscale(grayscale)
-                  .resize(resize)
-                  .toFile('pictures_resized/' + referenceImage),
+                this.sharp.convertAndRezizeToWebp(
+                  sharpStream,
+                  quality,
+                  grayscale,
+                  resize,
+                  referenceImage,
+                ),
               );
             }
 
             const resultPromise = await Promise.all(promises)
-              .then(async (res) => {
-                console.log('Sucesso', res);
-
+              .then(async () => {
                 //Descobrindo o buffer da imagem
                 const buffer = fs.readFileSync(
                   'pictures_resized/' + referenceImage,
@@ -208,21 +207,20 @@ export class ImagesService {
                 );
 
                 try {
-                  //Subindo imagem para o S3
-                  const responseUpload = await this.s3_upload(
+                  const responseUpload = await this.s3.uploadImage(
                     buffer,
-                    this.AWS_S3_BUCKET + '/pictures-resized',
+                    this.s3.AWS_S3_BUCKET + '/pictures-resized',
                     referenceImage,
                     'image/' + query.fm,
                   );
 
                   return responseUpload;
                 } catch (error) {
-                  throw error;
+                  throw new BadRequestException('Erro ao processar a imagem');
                 }
               })
-              .catch((err) => {
-                console.error('Erro ao processar a imagem', err);
+              .catch(() => {
+                throw new BadRequestException('Erro ao processar a imagem');
               });
 
             return {
@@ -257,43 +255,44 @@ export class ImagesService {
             grayscale = true;
           }
 
-          if (query == 'jpg') {
+          if (query == 'jpg' || query == 'jpeg') {
             promises.push(
-              sharpStream
-                .clone()
-                .jpeg({ quality: quality })
-                .grayscale(grayscale)
-                .resize(resize)
-                .toFile('pictures_resized/' + newNameImageOriginal),
+              this.sharp.convertAndRezizeToJpg(
+                sharpStream,
+                quality,
+                grayscale,
+                resize,
+                newNameImageOriginal,
+              ),
             );
           }
 
           if (nameImageSplit[1] == 'png') {
             promises.push(
-              sharpStream
-                .clone()
-                .png({ quality: quality })
-                .grayscale(grayscale)
-                .resize(resize)
-                .toFile('pictures_resized/' + newNameImageOriginal),
+              this.sharp.convertAndRezizeToPng(
+                sharpStream,
+                quality,
+                grayscale,
+                resize,
+                newNameImageOriginal,
+              ),
             );
           }
 
           if (nameImageSplit[1] == 'webp') {
             promises.push(
-              sharpStream
-                .clone()
-                .webp({ quality: quality })
-                .grayscale(grayscale)
-                .resize(resize)
-                .toFile('pictures_resized/' + newNameImageOriginal),
+              this.sharp.convertAndRezizeToWebp(
+                sharpStream,
+                quality,
+                grayscale,
+                resize,
+                newNameImageOriginal,
+              ),
             );
           }
 
           const resultPromise = await Promise.all(promises)
-            .then(async (res) => {
-              console.log('Sucesso!', res);
-
+            .then(async () => {
               //Descobrindo o buffer da imagem
               const buffer = fs.readFileSync(
                 'pictures_resized/' + newNameImageOriginal,
@@ -301,10 +300,9 @@ export class ImagesService {
               );
 
               try {
-                //Subindo imagem para o S3
-                const responseUpload = await this.s3_upload(
+                const responseUpload = await this.s3.uploadImage(
                   buffer,
-                  this.AWS_S3_BUCKET + '/pictures-resized',
+                  this.s3.AWS_S3_BUCKET + '/pictures-resized',
                   newNameImageOriginal,
                   'image/' + nameImageSplit[1],
                 );
@@ -314,8 +312,8 @@ export class ImagesService {
                 throw error;
               }
             })
-            .catch((err) => {
-              console.error('Erro ao processar a imagem', err);
+            .catch(() => {
+              throw new BadRequestException('Erro ao processar a imagem');
             });
 
           return {
@@ -323,46 +321,8 @@ export class ImagesService {
           };
         }
       }
-    } catch (headErr: any) {
-      throw new HttpException(
-        {
-          status: HttpStatus.FORBIDDEN,
-          error: 'Imagem não encontrada',
-        },
-        HttpStatus.FORBIDDEN,
-        {
-          cause: headErr,
-        },
-      );
-    }
-  }
-
-  async s3_upload(file, bucket, referenceImage, mimetype) {
-    const params = {
-      Bucket: bucket,
-      Key: String(referenceImage),
-      Body: file,
-      ACL: 'public-read',
-      ContentType: mimetype,
-      ContentDisposition: 'inline',
-      CreateBucketConfiguration: {
-        LocationConstraint: process.env.AWS_REGION,
-      },
-    };
-
-    try {
-      const s3Response = await this.s3.upload(params).promise();
-
-      //Verificar se o arquivo existe na pasta
-      const fileExists = fs.existsSync('pictures_resized/' + referenceImage);
-      if (fileExists == true) {
-        //Exclui a imagem temporária que foi salva na pasta "pictures_resized"
-        fs.unlinkSync('pictures_resized/' + referenceImage);
-      }
-
-      return s3Response;
-    } catch (e) {
-      console.log(e);
+    } catch (error) {
+      throw new NotFoundException('Imagem não encontrada');
     }
   }
 }
